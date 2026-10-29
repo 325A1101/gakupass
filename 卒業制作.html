@@ -1,0 +1,1116 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>浦山学園 資格試験AI演習</title>
+  <!-- Tailwind CSS -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- React & ReactDOM -->
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+  <!-- Babel for JSX -->
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <!-- Lucide Icons CDN -->
+  <script src="https://unpkg.com/lucide@latest"></script>
+</head>
+<body class="bg-slate-950 text-slate-100 antialiased">
+  <div id="root"></div>
+
+  <!-- type="text/babel" に修正 -->
+  <script type="text/babel" data-type="module">
+    import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+    import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+    import { getFirestore, doc, setDoc, getDoc, collection, query, onSnapshot, addDoc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+    const { useState, useEffect, useRef } = React;
+
+    // Firebase 初期設定 & 安全な初期化
+    const appId = typeof __app_id !== 'undefined' ? __app_id : 'urayama-exam-ai';
+    let db = null;
+    let auth = null;
+
+    try {
+      if (typeof __firebase_config !== 'undefined' && __firebase_config) {
+        const firebaseConfig = JSON.parse(__firebase_config);
+        const app = initializeApp(firebaseConfig);
+        db = getFirestore(app);
+        auth = getAuth(app);
+      }
+    } catch (e) {
+      console.warn("Firebase config not available or initialization skipped, relying on LocalStorage persistence:", e);
+    }
+
+    // Lucide Icon Component Helper
+    const Icon = ({ name, className = "w-4 h-4" }) => {
+      const ref = useRef(null);
+      useEffect(() => {
+        if (ref.current && window.lucide) {
+          ref.current.innerHTML = '';
+          const i = document.createElement('i');
+          i.setAttribute('data-lucide', name);
+          i.className = className;
+          ref.current.appendChild(i);
+          window.lucide.createIcons({
+            attrs: { class: className },
+            nameAttr: 'data-lucide'
+          });
+        }
+      }, [name, className]);
+      return <span ref={ref} className="inline-flex items-center justify-center" />;
+    };
+
+    // Icon components mapping
+    const BookOpen = (props) => <Icon name="book-open" {...props} />;
+    const CheckCircle = (props) => <Icon name="check-circle" {...props} />;
+    const XCircle = (props) => <Icon name="x-circle" {...props} />;
+    const Clock = (props) => <Icon name="clock" {...props} />;
+    const Award = (props) => <Icon name="award" {...props} />;
+    const RotateCcw = (props) => <Icon name="rotate-ccw" {...props} />;
+    const Search = (props) => <Icon name="search" {...props} />;
+    const ShieldCheck = (props) => <Icon name="shield-check" {...props} />;
+    const User = (props) => <Icon name="user" {...props} />;
+    const LogOut = (props) => <Icon name="log-out" {...props} />;
+    const ArrowRight = (props) => <Icon name="arrow-right" {...props} />;
+    const ArrowLeft = (props) => <Icon name="arrow-left" {...props} />;
+    const FileText = (props) => <Icon name="file-text" {...props} />;
+    const Sparkles = (props) => <Icon name="sparkles" {...props} />;
+    const AlertCircle = (props) => <Icon name="alert-circle" {...props} />;
+    const RefreshCw = (props) => <Icon name="refresh-cw" {...props} />;
+    const BarChart2 = (props) => <Icon name="bar-chart-2" {...props} />;
+    const Bookmark = (props) => <Icon name="bookmark" {...props} />;
+    const CloudCheck = (props) => <Icon name="cloud-check" {...props} />;
+
+    // 浦山学園 ドメイン制限の設定
+    const ALLOWED_DOMAIN = '@urayama.ac.jp';
+
+    // 人気資格のプリセットタグ
+    const QUICK_EXAMS = [
+      '基本情報技術者試験 科目A',
+      'ITパスポート 2024年',
+      '応用情報技術者試験 午前',
+      '日商簿記3級 商業簿記',
+      '宅地建物取引士（宅建）',
+      '危険物取扱者 乙種4類'
+    ];
+
+    function App() {
+      // ユーザー状態（現在ログイン中のユーザー情報）
+      const [user, setUser] = useState(() => {
+        const saved = localStorage.getItem('urayama_cert_user');
+        return saved ? JSON.parse(saved) : null;
+      });
+
+      const [firebaseUser, setFirebaseUser] = useState(null);
+      const [emailInput, setEmailInput] = useState('');
+      const [nameInput, setNameInput] = useState('');
+      const [loginError, setLoginError] = useState('');
+
+      // 画面モード: 'dashboard', 'generating', 'quiz', 'result', 'history', 'review_detail'
+      const [screen, setScreen] = useState('dashboard');
+
+      // 試験作成の設定
+      const [examQuery, setExamQuery] = useState('');
+      const [questionCount, setQuestionCount] = useState(10);
+      const [isGenerating, setIsGenerating] = useState(false);
+      const [generationProgress, setGenerationProgress] = useState(0);
+      const [genError, setGenError] = useState('');
+
+      // クイズ実施中データ
+      const [currentExam, setCurrentExam] = useState(null);
+      const [currentIndex, setCurrentIndex] = useState(0);
+      const [selectedAnswers, setSelectedAnswers] = useState({});
+      const [flaggedQuestions, setFlaggedQuestions] = useState({});
+      const [timer, setTimer] = useState(0);
+      const timerRef = useRef(null);
+
+      // メールアドレスに依存する個別の履歴データ
+      const [examHistory, setExamHistory] = useState([]);
+      const [selectedHistoryItem, setSelectedHistoryItem] = useState(null);
+
+      // Firebase 匿名認証ハンドリング
+      useEffect(() => {
+        if (!auth) return;
+        const authenticate = async () => {
+          try {
+            if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+              await signInWithCustomToken(auth, __initial_auth_token);
+            } else {
+              await signInAnonymously(auth);
+            }
+          } catch (err) {
+            console.error("Auth sign-in error:", err);
+          }
+        };
+
+        authenticate();
+
+        const unsubscribe = onAuthStateChanged(auth, (fUser) => {
+          setFirebaseUser(fUser);
+        });
+        return () => unsubscribe();
+      }, []);
+
+      // ログイン中ユーザーのメールアドレスに対応する履歴のロード（ローカル & クラウド）
+      useEffect(() => {
+        if (!user || !user.email) {
+          setExamHistory([]);
+          return;
+        }
+
+        const userStorageKey = `urayama_history_${user.email.trim().toLowerCase()}`;
+
+        // 1. ローカルストレージから該当メールアドレスの履歴を即時読込
+        const localSaved = localStorage.getItem(userStorageKey);
+        if (localSaved) {
+          try {
+            setExamHistory(JSON.parse(localSaved));
+          } catch (e) {
+            console.error("Local history parse error:", e);
+          }
+        } else {
+          setExamHistory([]);
+        }
+
+        // 2. Firebase Firestoreからのリアルタイム同期（クラウド保存）
+        if (db && firebaseUser) {
+          const userDocId = encodeURIComponent(user.email.trim().toLowerCase());
+          const historyCollectionRef = collection(db, 'artifacts', appId, 'users', userDocId, 'exam_history');
+
+          const unsubscribe = onSnapshot(historyCollectionRef, (snapshot) => {
+            const items = [];
+            snapshot.forEach((doc) => {
+              items.push({ id: doc.id, ...doc.data() });
+            });
+
+            // 日時順で降順ソート
+            items.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
+
+            if (items.length > 0) {
+              setExamHistory(items);
+              localStorage.setItem(userStorageKey, JSON.stringify(items));
+            }
+          }, (err) => {
+            console.error("Firestore sync error:", err);
+          });
+
+          return () => unsubscribe();
+        }
+      }, [user, firebaseUser]);
+
+      const handleLogin = (e) => {
+        e.preventDefault();
+        setLoginError('');
+
+        const trimmedEmail = emailInput.trim().toLowerCase();
+        if (!trimmedEmail.endsWith(ALLOWED_DOMAIN)) {
+          setLoginError(`ログインエラー: 浦山学園専用のアドレス (${ALLOWED_DOMAIN}) を使用してください。`);
+          return;
+        }
+
+        if (!nameInput.trim()) {
+          setLoginError('お名前（学籍氏名）を入力してください。');
+          return;
+        }
+
+        const userData = {
+          email: trimmedEmail,
+          name: nameInput.trim(),
+          studentId: trimmedEmail.split('@')[0]
+        };
+
+        setUser(userData);
+        localStorage.setItem('urayama_cert_user', JSON.stringify(userData));
+      };
+
+      const handleLogout = () => {
+        setUser(null);
+        localStorage.removeItem('urayama_cert_user');
+        setExamHistory([]);
+        setScreen('dashboard');
+      };
+
+      // タイマー処理
+      useEffect(() => {
+        if (screen === 'quiz') {
+          timerRef.current = setInterval(() => {
+            setTimer(prev => prev + 1);
+          }, 1000);
+        } else {
+          clearInterval(timerRef.current);
+        }
+        return () => clearInterval(timerRef.current);
+      }, [screen]);
+
+      const fetchQuestionsFromAI = async (query, count) => {
+        setIsGenerating(true);
+        setGenError('');
+        setGenerationProgress(20);
+
+        // ※ここにご自身の Gemini API Key を記述してください
+        const apiKey = ""; 
+        if (!apiKey) {AQ
+          throw new Error("APIキーが設定されていません。コード内の apiKey 変数にGemini APIキーを設定してください。");
+        }
+
+        const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key=${apiKey}`;
+
+        const systemPrompt = `
+あなたは資格試験の専門家・教育AIです。
+指定された資格試験（例: ${query}）の「実際の試験で出題される知識・実践・計算問題」を${count}問作成してください。
+
+【重要な注意事項（NG例の排除）】
+- 「この試験の合格率は？」「この試験の主催者は？」「この試験の実施形式は？」といった、試験制度そのものに関するメタ問題は絶対に出題しないでください。
+- 必ず、受験者が学習・対策すべき「試験科目・分野の実戦問題（専門知識、概念、計算、事例問題など）」を作成してください。
+
+【厳格ルール】
+1. 出力は必ず指定するJSONフォーマットのみとし、余計なMarkdown装飾や前置きは含めないでください。
+2. 各問題には丁寧で分かりやすい解説（explanation）を含めてください。
+`;
+
+const userPrompt = `
+対象試験: "${query}"
+出題数: ${count}問
+
+この試験の【実際の試験問題】として相応しい実戦問題（分野知識、過去問類似問題）を${count}問作成してください。
+
+JSONフォーマット:
+{
+  "examTitle": "${query}",
+  "questions": [
+    {
+      "id": 1,
+      "question": "（ここに試験分野の実践的な問題文を入力）",
+      "options": ["選択肢A", "選択肢B", "選択肢C", "選択肢D"],
+      "correctIndex": 0,
+      "explanation": "（ここに専門的な解説を入力。なぜこの選択肢が正解なのかを明確に。）"
+    }
+  ]
+}
+`;
+
+        try {
+          setGenerationProgress(40);
+          const payload = {
+            contents: [{ role: 'user', parts: [{ text: userPrompt }] }],
+            systemInstruction: { parts: [{ text: systemPrompt }] },
+            generationConfig: {
+              responseMimeType: "application/json"
+            }
+          };
+
+          const res = await fetch(apiUrl, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+          });
+
+          setGenerationProgress(75);
+
+          if (!res.ok) {
+            throw new Error(`AI通信エラー (Status: ${res.status}) - API通信に失敗しました。もう一度お試しください。`);
+          }
+
+          const data = await res.json();
+          const rawText = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+
+          if (!rawText) {
+            throw new Error('AIからの応答データが空でした。もう一度お試しください。');
+          }
+
+          const parsedData = JSON.parse(rawText);
+          setGenerationProgress(100);
+
+          if (!parsedData.questions || !Array.isArray(parsedData.questions) || parsedData.questions.length === 0) {
+            throw new Error('問題データの生成に失敗しました。試験名を詳しく変更してお試しください。');
+          }
+
+          return parsedData;
+        } catch (err) {
+          console.error(err);
+          throw new Error(err.message || '問題の生成中にエラーが発生しました。');
+        } finally {
+          setIsGenerating(false);
+        }
+      };
+
+      const handleStartExam = async (selectedQuery) => {
+        const targetQuery = selectedQuery || examQuery;
+        if (!targetQuery.trim()) return;
+
+        try {
+          setScreen('generating');
+          const aiResult = await fetchQuestionsFromAI(targetQuery, questionCount);
+
+          const newExam = {
+            id: `exam_${Date.now()}`,
+            title: aiResult.examTitle || targetQuery,
+            questions: aiResult.questions,
+            createdAt: new Date().toLocaleDateString('ja-JP', {
+              year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit'
+            }),
+            userAnswers: {},
+            score: 0,
+            timeSpent: 0
+          };
+
+          setCurrentExam(newExam);
+          setCurrentIndex(0);
+          setSelectedAnswers({});
+          setFlaggedQuestions({});
+          setTimer(0);
+          setScreen('quiz');
+        } catch (err) {
+          setGenError(err.message);
+          setScreen('dashboard');
+        }
+      };
+
+      const handleSelectOption = (optIndex) => {
+        setSelectedAnswers(prev => ({
+          ...prev,
+          [currentIndex]: optIndex
+        }));
+      };
+
+      const toggleFlag = (index) => {
+        setFlaggedQuestions(prev => ({
+          ...prev,
+          [index]: !prev[index]
+        }));
+      };
+
+      // テスト終了時の保存（ローカル & クラウド）
+      const handleSubmitQuiz = async () => {
+        let correctCount = 0;
+        currentExam.questions.forEach((q, idx) => {
+          if (selectedAnswers[idx] === q.correctIndex) {
+            correctCount++;
+          }
+        });
+
+        const finalScore = Math.round((correctCount / currentExam.questions.length) * 100);
+        const timestamp = Date.now();
+
+        const completedExam = {
+          ...currentExam,
+          userAnswers: selectedAnswers,
+          score: finalScore,
+          correctCount,
+          totalCount: currentExam.questions.length,
+          timeSpent: timer,
+          studentName: user.name,
+          studentEmail: user.email,
+          timestamp
+        };
+
+        const updatedHistory = [completedExam, ...examHistory];
+        setExamHistory(updatedHistory);
+
+        // 1. メールアドレス専用キーでローカルストレージに即時保存
+        const userStorageKey = `urayama_history_${user.email.trim().toLowerCase()}`;
+        localStorage.setItem(userStorageKey, JSON.stringify(updatedHistory));
+
+        // 2. Firestoreクラウドストレージに保存
+        if (db && firebaseUser) {
+          try {
+            const userDocId = encodeURIComponent(user.email.trim().toLowerCase());
+            const historyCollectionRef = collection(db, 'artifacts', appId, 'users', userDocId, 'exam_history');
+            await addDoc(historyCollectionRef, completedExam);
+          } catch (e) {
+            console.error("Firestore save error:", e);
+          }
+        }
+
+        setCurrentExam(completedExam);
+        setScreen('result');
+      };
+
+      const formatTime = (seconds) => {
+        const mins = Math.floor(seconds / 60);
+        const secs = seconds % 60;
+        return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+      };
+
+      if (!user) {
+        return (
+          <div className="min-h-screen bg-slate-900 text-slate-100 flex items-center justify-center p-4">
+            <div className="max-w-md w-full bg-slate-800 border border-slate-700 rounded-2xl p-8 shadow-2xl relative overflow-hidden">
+              <div className="absolute -top-12 -right-12 w-32 h-32 bg-blue-600/20 rounded-full blur-2xl pointer-events-none"></div>
+              <div className="absolute -bottom-12 -left-12 w-32 h-32 bg-indigo-600/20 rounded-full blur-2xl pointer-events-none"></div>
+
+              <div className="text-center mb-8">
+                <div className="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-gradient-to-tr from-blue-600 to-indigo-500 mb-4 shadow-lg shadow-indigo-500/30">
+                  <BookOpen className="w-8 h-8 text-white" />
+                </div>
+                <h1 className="text-2xl font-bold tracking-tight text-white">浦山学園 資格試験AI演習</h1>
+                <p className="text-xs text-slate-400 mt-2">
+                  学生専用ポータル（<span className="text-blue-400 font-mono">@urayama.ac.jp</span> 限定）
+                </p>
+              </div>
+
+              {loginError && (
+                <div className="mb-6 p-4 rounded-xl bg-red-500/10 border border-red-500/30 flex items-start gap-3 text-red-400 text-sm">
+                  <AlertCircle className="w-5 h-5 shrink-0 mt-0.5" />
+                  <div>{loginError}</div>
+                </div>
+              )}
+
+              <form onSubmit={handleLogin} className="space-y-4">
+                <div>
+                  <label className="block text-xs font-semibold text-slate-300 uppercase tracking-wider mb-1.5">
+                    学籍氏名
+                  </label>
+                  <div className="relative">
+                    <User className="w-5 h-5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                    <input
+                      type="text"
+                      required
+                      placeholder="浦山 太郎"
+                      value={nameInput}
+                      onChange={(e) => setNameInput(e.target.value)}
+                      className="w-full bg-slate-900 border border-slate-700 rounded-xl py-3 pl-10 pr-4 text-slate-100 placeholder-slate-500 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 transition-all text-sm"
+                    />
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-semibold text-slate-300 uppercase tracking-wider mb-1.5">
+                    学園メールアドレス
+                  </label>
+                  <div className="relative">
+                    <ShieldCheck className="w-5 h-5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                    <input
+                      type="email"
+                      required
+                      placeholder="s12345@urayama.ac.jp"
+                      value={emailInput}
+                      onChange={(e) => setEmailInput(e.target.value)}
+                      className="w-full bg-slate-900 border border-slate-700 rounded-xl py-3 pl-10 pr-4 text-slate-100 placeholder-slate-500 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 transition-all text-sm"
+                    />
+                  </div>
+                  <p className="text-[11px] text-slate-500 mt-1">※ メールアドレスごとに学習履歴・解答ログが自動保存されます</p>
+                </div>
+
+                <button
+                  type="submit"
+                  className="w-full py-3.5 px-4 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white font-medium rounded-xl shadow-lg shadow-indigo-600/30 transition-all duration-200 flex items-center justify-center gap-2 text-sm mt-2"
+                >
+                  ログインして演習を開始
+                  <ArrowRight className="w-4 h-4" />
+                </button>
+              </form>
+
+              <div className="mt-6 pt-6 border-t border-slate-800 text-center">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setNameInput('浦山 太郎');
+                    setEmailInput('student@urayama.ac.jp');
+                  }}
+                  className="text-xs text-blue-400 hover:text-blue-300 transition-colors"
+                >
+                  [デモ用] テストアカウント情報を自動入力する
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      }
+
+      return (
+        <div className="min-h-screen bg-slate-950 text-slate-100 font-sans flex flex-col">
+          <header className="border-b border-slate-800 bg-slate-900/80 backdrop-blur-md sticky top-0 z-50">
+            <div className="max-w-6xl mx-auto px-4 py-3 flex items-center justify-between">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 rounded-xl bg-gradient-to-tr from-blue-600 to-indigo-500 flex items-center justify-center shadow-md">
+                  <BookOpen className="w-5 h-5 text-white" />
+                </div>
+                <div>
+                  <h1 className="font-bold text-sm text-slate-100 leading-none">浦山学園 資格試験AI</h1>
+                  <div className="flex items-center gap-2 mt-1">
+                    <span className="text-[10px] text-blue-400 bg-blue-500/10 px-2 py-0.5 rounded border border-blue-500/20 inline-block">
+                      @urayama.ac.jp 認証済み
+                    </span>
+                    <span className="text-[10px] text-emerald-400 flex items-center gap-1 bg-emerald-500/10 px-1.5 py-0.5 rounded border border-emerald-500/20">
+                      <CloudCheck className="w-3 h-3" /> クラウド自動同期
+                    </span>
+                  </div>
+                </div>
+              </div>
+
+              <div className="flex items-center gap-4">
+                <div className="text-right hidden sm:block">
+                  <p className="text-xs font-medium text-slate-200">{user.name}</p>
+                  <p className="text-[10px] text-slate-400">{user.email}</p>
+                </div>
+                <button
+                  onClick={handleLogout}
+                  className="p-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-slate-200 transition-colors"
+                  title="ログアウト"
+                >
+                  <LogOut className="w-4 h-4" />
+                </button>
+              </div>
+            </div>
+          </header>
+
+          <main className="flex-1 max-w-6xl w-full mx-auto p-4 md:p-6">
+            <div className="flex items-center gap-3 mb-6">
+              <button
+                onClick={() => setScreen('dashboard')}
+                className={`px-4 py-2 rounded-xl text-xs font-semibold flex items-center gap-2 transition-all ${
+                  screen === 'dashboard'
+                    ? 'bg-blue-600 text-white shadow-lg shadow-blue-600/30'
+                    : 'bg-slate-900 border border-slate-800 text-slate-400 hover:text-slate-200'
+                }`}
+              >
+                <Sparkles className="w-4 h-4" />
+                新規問題作成
+              </button>
+              <button
+                onClick={() => setScreen('history')}
+                className={`px-4 py-2 rounded-xl text-xs font-semibold flex items-center gap-2 transition-all ${
+                  screen === 'history' || screen === 'review_detail'
+                    ? 'bg-blue-600 text-white shadow-lg shadow-blue-600/30'
+                    : 'bg-slate-900 border border-slate-800 text-slate-400 hover:text-slate-200'
+                }`}
+              >
+                <RotateCcw className="w-4 h-4" />
+                過去の演習・復習庫 ({examHistory.length})
+              </button>
+            </div>
+
+            {screen === 'dashboard' && (
+              <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                <div className="lg:col-span-2 space-y-6">
+                  <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 relative overflow-hidden shadow-xl">
+                    <div className="flex items-center gap-2 text-blue-400 text-xs font-semibold tracking-wider uppercase mb-2">
+                      <Sparkles className="w-4 h-4" /> AI リアルタイム過去問・予想問題生成
+                    </div>
+                    <h2 className="text-xl font-bold text-white mb-2">どの資格・試験に挑戦しますか？</h2>
+                    <p className="text-xs text-slate-400 mb-6">
+                      試験名や年度を入力すると、Gemini AIが出題傾向を分析し、ランダムでマークシート問題を即時生成します。同一アドレスであれば次回以降も履歴が残ります。
+                    </p>
+
+                    {genError && (
+                      <div className="mb-6 p-4 rounded-xl bg-red-500/10 border border-red-500/30 flex items-start gap-3 text-red-400 text-xs">
+                        <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+                        <div>{genError}</div>
+                      </div>
+                    )}
+
+                    <form onSubmit={(e) => { e.preventDefault(); handleStartExam(); }} className="space-y-4">
+                      <div>
+                        <label className="block text-xs font-semibold text-slate-300 mb-2">
+                          試験名・年度・科目名を入力
+                        </label>
+                        <div className="relative">
+                          <Search className="w-5 h-5 text-slate-500 absolute left-3.5 top-1/2 -translate-y-1/2" />
+                          <input
+                            type="text"
+                            required
+                            placeholder="例：基本情報技術者試験科目A / 日商簿記3級 など"
+                            value={examQuery}
+                            onChange={(e) => setExamQuery(e.target.value)}
+                            className="w-full bg-slate-950 border border-slate-800 rounded-xl py-3.5 pl-11 pr-4 text-slate-100 placeholder-slate-600 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 text-sm transition-all"
+                          />
+                        </div>
+                      </div>
+
+                      <div>
+                        <label className="block text-xs font-semibold text-slate-300 mb-2">
+                          出題数
+                        </label>
+                        <div className="grid grid-cols-3 gap-3">
+                          {[10, 20, 30].map((count) => (
+                            <button
+                              key={count}
+                              type="button"
+                              onClick={() => setQuestionCount(count)}
+                              className={`py-2.5 rounded-xl border text-xs font-semibold transition-all ${
+                                questionCount === count
+                                  ? 'bg-blue-600/20 border-blue-500 text-blue-300'
+                                  : 'bg-slate-950 border-slate-800 text-slate-400 hover:border-slate-700'
+                              }`}
+                            >
+                              {count} 問出題 
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+
+                      <button
+                        type="submit"
+                        className="w-full py-4 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white font-semibold rounded-xl shadow-lg shadow-indigo-600/30 transition-all flex items-center justify-center gap-2 text-sm mt-4"
+                      >
+                        <Sparkles className="w-5 h-5" />
+                        AIで問題を自動生成して開始する
+                      </button>
+                    </form>
+
+                    <div className="mt-8 pt-6 border-t border-slate-800">
+                      <span className="text-xs font-semibold text-slate-400 block mb-3">クイック選択（人気の試験）:</span>
+                      <div className="flex flex-wrap gap-2">
+                        {QUICK_EXAMS.map((exam, idx) => (
+                          <button
+                            key={idx}
+                            onClick={() => {
+                              setExamQuery(exam);
+                              handleStartExam(exam);
+                            }}
+                            className="px-3 py-1.5 rounded-lg bg-slate-800/80 hover:bg-slate-700 border border-slate-700/50 text-xs text-slate-300 hover:text-white transition-colors"
+                          >
+                            + {exam}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="space-y-6">
+                  <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6">
+                    <h3 className="text-sm font-bold text-white mb-4 flex items-center gap-2">
+                      <BarChart2 className="w-4 h-4 text-blue-400" />
+                      あなたの学習ステータス
+                    </h3>
+                    <div className="space-y-3">
+                      <div className="p-3 rounded-xl bg-slate-950 border border-slate-800 flex justify-between items-center">
+                        <span className="text-xs text-slate-400">ログイン中のアカウント</span>
+                        <span className="text-xs font-mono font-bold text-blue-300 truncate max-w-[150px]">{user.email}</span>
+                      </div>
+                      <div className="p-3 rounded-xl bg-slate-950 border border-slate-800 flex justify-between items-center">
+                        <span className="text-xs text-slate-400">保存済み演習数</span>
+                        <span className="text-base font-bold text-white">{examHistory.length} 回</span>
+                      </div>
+                      <div className="p-3 rounded-xl bg-slate-950 border border-slate-800 flex justify-between items-center">
+                        <span className="text-xs text-slate-400">平均スコア</span>
+                        <span className="text-base font-bold text-emerald-400">
+                          {examHistory.length > 0
+                            ? `${Math.round(examHistory.reduce((acc, curr) => acc + (curr.score || 0), 0) / examHistory.length)}%`
+                            : '未計測'}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="bg-gradient-to-br from-indigo-900/30 to-slate-900 border border-indigo-500/20 rounded-2xl p-6">
+                    <h3 className="text-sm font-bold text-indigo-300 mb-2 flex items-center gap-2">
+                      <ShieldCheck className="w-4 h-4 text-indigo-400" /> 浦山学園 データの永続化
+                    </h3>
+                    <ul className="text-xs text-slate-300 space-y-2 list-disc list-inside">
+                      <li>メールアドレス単位で解答履歴・スコア・AI解説が管理されます。</li>
+                      <li>ブラウザのタブを閉じても、次回同じメールアドレスでログインすれば履歴が復元されます。</li>
+                      <li>クラウド（Firestore）にも即時バックアップされるため安全です。</li>
+                    </ul>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {screen === 'generating' && (
+              <div className="min-h-[500px] flex flex-col items-center justify-center text-center p-8 bg-slate-900 border border-slate-800 rounded-2xl">
+                <div className="relative mb-6">
+                  <div className="w-20 h-20 rounded-full border-4 border-blue-500/20 border-t-blue-500 animate-spin"></div>
+                  <Sparkles className="w-8 h-8 text-blue-400 absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2" />
+                </div>
+                <h2 className="text-xl font-bold text-white mb-2">AIが問題を検索・生成中...</h2>
+                <p className="text-xs text-slate-400 max-w-md mb-6">
+                  「<span className="text-blue-300 font-medium">{examQuery}</span>」の傾向に合わせて、ランダム{questionCount}問のマークシート選択肢と解説を構築しています。
+                </p>
+                <div className="w-full max-w-xs bg-slate-800 rounded-full h-2 overflow-hidden border border-slate-700">
+                  <div
+                    className="bg-gradient-to-r from-blue-500 to-indigo-500 h-full transition-all duration-500"
+                    style={{ width: `${generationProgress}%` }}
+                  ></div>
+                </div>
+              </div>
+            )}
+
+            {screen === 'quiz' && currentExam && (
+              <div className="space-y-6 max-w-4xl mx-auto">
+                <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 flex items-center justify-between shadow-lg">
+                  <div>
+                    <span className="text-xs text-blue-400 font-semibold block">{currentExam.title}</span>
+                    <span className="text-sm font-bold text-white">
+                      問題 {currentIndex + 1} / {currentExam.questions.length}
+                    </span>
+                  </div>
+
+                  <div className="flex items-center gap-4">
+                    <div className="flex items-center gap-1.5 bg-slate-950 px-3 py-1.5 rounded-xl border border-slate-800 text-xs text-slate-300">
+                      <Clock className="w-4 h-4 text-blue-400" />
+                      <span className="font-mono text-sm font-semibold">{formatTime(timer)}</span>
+                    </div>
+
+                    <button
+                      onClick={() => toggleFlag(currentIndex)}
+                      className={`p-2 rounded-xl border transition-all text-xs flex items-center gap-1 ${
+                        flaggedQuestions[currentIndex]
+                          ? 'bg-amber-500/20 border-amber-500 text-amber-300'
+                          : 'bg-slate-950 border-slate-800 text-slate-400 hover:text-slate-200'
+                      }`}
+                      title="見直すフラグ"
+                    >
+                      <Bookmark className="w-4 h-4" />
+                      <span className="hidden sm:inline">あとで見返す</span>
+                    </button>
+                  </div>
+                </div>
+
+                <div className="w-full bg-slate-900 rounded-full h-2 overflow-hidden border border-slate-800">
+                  <div
+                    className="bg-blue-600 h-full transition-all duration-300"
+                    style={{ width: `${((currentIndex + 1) / currentExam.questions.length) * 100}%` }}
+                  ></div>
+                </div>
+
+                <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-xl">
+                  <h3 className="text-base sm:text-lg font-semibold text-slate-100 leading-relaxed mb-6">
+                    Q{currentIndex + 1}. {currentExam.questions[currentIndex].question}
+                  </h3>
+
+                  <div className="space-y-3">
+                    {currentExam.questions[currentIndex].options.map((opt, optIdx) => {
+                      const isSelected = selectedAnswers[currentIndex] === optIdx;
+                      return (
+                        <button
+                          key={optIdx}
+                          onClick={() => handleSelectOption(optIdx)}
+                          className={`w-full text-left p-4 rounded-xl border text-sm transition-all flex items-center justify-between ${
+                            isSelected
+                              ? 'bg-blue-600/20 border-blue-500 text-white shadow-md shadow-blue-500/10'
+                              : 'bg-slate-950 border-slate-800 text-slate-300 hover:bg-slate-800/50 hover:border-slate-700'
+                          }`}
+                        >
+                          <div className="flex items-center gap-3">
+                            <span className={`w-6 h-6 rounded-full border text-xs font-bold flex items-center justify-center shrink-0 ${
+                              isSelected ? 'border-blue-400 bg-blue-500 text-white' : 'border-slate-700 text-slate-400'
+                            }`}>
+                              {['A', 'B', 'C', 'D'][optIdx]}
+                            </span>
+                            <span>{opt}</span>
+                          </div>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                <div className="flex items-center justify-between pt-2">
+                  <button
+                    onClick={() => setCurrentIndex(prev => Math.max(0, prev - 1))}
+                    disabled={currentIndex === 0}
+                    className="px-5 py-2.5 rounded-xl bg-slate-900 border border-slate-800 text-slate-300 disabled:opacity-40 disabled:cursor-not-allowed hover:bg-slate-800 text-xs font-semibold flex items-center gap-2 transition-all"
+                  >
+                    <ArrowLeft className="w-4 h-4" /> 前の問題
+                  </button>
+
+                  {currentIndex < currentExam.questions.length - 1 ? (
+                    <button
+                      onClick={() => setCurrentIndex(prev => Math.min(currentExam.questions.length - 1, prev + 1))}
+                      className="px-6 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold flex items-center gap-2 shadow-lg shadow-blue-600/30 transition-all"
+                    >
+                      次の問題 <ArrowRight className="w-4 h-4" />
+                    </button>
+                  ) : (
+                    <button
+                      onClick={handleSubmitQuiz}
+                      className="px-6 py-2.5 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white text-xs font-bold flex items-center gap-2 shadow-lg shadow-emerald-600/30 transition-all"
+                    >
+                      <CheckCircle className="w-4 h-4" /> 試験を終了して採点・保存する
+                    </button>
+                  )}
+                </div>
+
+                <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4">
+                  <span className="text-xs text-slate-400 font-semibold block mb-2">問題一覧ジャンプ:</span>
+                  <div className="flex flex-wrap gap-2">
+                    {currentExam.questions.map((_, idx) => {
+                      const isAnswered = selectedAnswers[idx] !== undefined;
+                      const isCurrent = currentIndex === idx;
+                      const isFlagged = flaggedQuestions[idx];
+
+                      return (
+                        <button
+                          key={idx}
+                          onClick={() => setCurrentIndex(idx)}
+                          className={`w-8 h-8 rounded-lg text-xs font-bold transition-all relative ${
+                            isCurrent
+                              ? 'ring-2 ring-blue-400 bg-blue-600 text-white'
+                              : isAnswered
+                              ? 'bg-slate-800 text-slate-200 border border-slate-700'
+                              : 'bg-slate-950 text-slate-500 border border-slate-800'
+                          }`}
+                        >
+                          {idx + 1}
+                          {isFlagged && (
+                            <span className="w-2 h-2 rounded-full bg-amber-400 absolute -top-0.5 -right-0.5"></span>
+                          )}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {screen === 'result' && currentExam && (
+              <div className="space-y-6 max-w-4xl mx-auto">
+                <div className="bg-gradient-to-br from-slate-900 to-slate-900/90 border border-slate-800 rounded-2xl p-8 text-center shadow-2xl relative overflow-hidden">
+                  <div className="inline-flex items-center justify-center w-16 h-16 rounded-full bg-blue-500/10 border border-blue-500/30 mb-4">
+                    <Award className="w-8 h-8 text-blue-400" />
+                  </div>
+                  <h2 className="text-2xl font-bold text-white">{currentExam.title} 採点結果</h2>
+                  <p className="text-xs text-slate-400 mt-1">受講日時: {currentExam.createdAt} | 解答時間: {formatTime(currentExam.timeSpent)}</p>
+
+                  <div className="my-6 inline-block bg-slate-950 px-8 py-4 rounded-2xl border border-slate-800">
+                    <span className="text-4xl font-extrabold text-blue-400">{currentExam.score}</span>
+                    <span className="text-sm text-slate-400 font-bold ml-1">/ 100 点</span>
+                    <p className="text-xs text-slate-400 mt-1">
+                      正解数: {currentExam.correctCount} / {currentExam.totalCount} 問
+                    </p>
+                  </div>
+
+                  <p className="text-xs text-emerald-400 flex items-center justify-center gap-1 mb-6">
+                    <CloudCheck className="w-4 h-4" /> この結果は {user.email} のアカウント履歴に保存されました
+                  </p>
+
+                  <div className="flex justify-center gap-4">
+                    <button
+                      onClick={() => setScreen('dashboard')}
+                      className="px-5 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold transition-all"
+                    >
+                      新しいテストを作成
+                    </button>
+                    <button
+                      onClick={() => handleStartExam(currentExam.title)}
+                      className="px-5 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold flex items-center gap-2 shadow-lg shadow-blue-600/30 transition-all"
+                    >
+                      <RefreshCw className="w-4 h-4" /> もう一度この試験を解く
+                    </button>
+                  </div>
+                </div>
+
+                <div className="space-y-4">
+                  <h3 className="text-base font-bold text-white flex items-center gap-2">
+                    <FileText className="w-5 h-5 text-blue-400" /> 全問の正解・AI詳細解説
+                  </h3>
+
+                  {currentExam.questions.map((q, idx) => {
+                    const userAns = currentExam.userAnswers[idx];
+                    const isCorrect = userAns === q.correctIndex;
+
+                    return (
+                      <div key={idx} className="bg-slate-900 border border-slate-800 rounded-2xl p-6 space-y-4">
+                        <div className="flex items-start justify-between gap-4">
+                          <div className="flex items-center gap-2">
+                            {isCorrect ? (
+                              <span className="px-3 py-1 rounded-lg bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 text-xs font-bold flex items-center gap-1">
+                                <CheckCircle className="w-4 h-4" /> 正解
+                              </span>
+                            ) : (
+                              <span className="px-3 py-1 rounded-lg bg-red-500/10 border border-red-500/30 text-red-400 text-xs font-bold flex items-center gap-1">
+                                <XCircle className="w-4 h-4" /> 不正解
+                              </span>
+                            )}
+                            <span className="text-xs font-bold text-slate-400">問 {idx + 1}</span>
+                          </div>
+                        </div>
+
+                        <h4 className="text-sm font-semibold text-slate-100">{q.question}</h4>
+
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs">
+                          {q.options.map((opt, optIdx) => {
+                            const isUserChoice = userAns === optIdx;
+                            const isRightChoice = q.correctIndex === optIdx;
+
+                            let styleClass = 'bg-slate-950 border-slate-800 text-slate-400';
+                            if (isRightChoice) styleClass = 'bg-emerald-500/10 border-emerald-500/40 text-emerald-300 font-semibold';
+                            else if (isUserChoice && !isRightChoice) styleClass = 'bg-red-500/10 border-red-500/40 text-red-300';
+
+                            return (
+                              <div key={optIdx} className={`p-3 rounded-xl border ${styleClass} flex items-center justify-between`}>
+                                <span>
+                                  <span className="font-bold mr-2">{['A', 'B', 'C', 'D'][optIdx]}.</span>
+                                  {opt}
+                                </span>
+                                {isRightChoice && <span className="text-[10px] bg-emerald-500/20 text-emerald-300 px-2 py-0.5 rounded">正解</span>}
+                                {isUserChoice && !isRightChoice && <span className="text-[10px] bg-red-500/20 text-red-300 px-2 py-0.5 rounded">あなたの回答</span>}
+                              </div>
+                            );
+                          })}
+                        </div>
+
+                        <div className="p-4 rounded-xl bg-slate-950 border border-slate-800 text-xs text-slate-300 space-y-1">
+                          <span className="font-bold text-blue-400 flex items-center gap-1 mb-1">
+                            <Sparkles className="w-3.5 h-3.5" /> AI解説
+                          </span>
+                          <p className="leading-relaxed text-slate-300">{q.explanation}</p>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
+            {screen === 'history' && (
+              <div className="space-y-6 max-w-4xl mx-auto">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <h2 className="text-lg font-bold text-white">復習ライブラリ（演習履歴）</h2>
+                    <p className="text-xs text-slate-400">
+                      <span className="text-blue-300 font-semibold">{user.email}</span> に紐づく過去の演習記録です。次回ログイン時もいつでも確認できます。
+                    </p>
+                  </div>
+                </div>
+
+                {examHistory.length === 0 ? (
+                  <div className="text-center py-16 bg-slate-900 border border-slate-800 rounded-2xl p-8">
+                    <BookOpen className="w-12 h-12 text-slate-600 mx-auto mb-3" />
+                    <p className="text-sm text-slate-400 font-medium">まだこのアカウントでの演習履歴がありません。</p>
+                    <p className="text-xs text-slate-500 mt-1 mb-4">新規問題作成から好きな試験名を検索して挑戦してみましょう！</p>
+                    <button
+                      onClick={() => setScreen('dashboard')}
+                      className="px-4 py-2 bg-blue-600 text-white rounded-xl text-xs font-semibold"
+                    >
+                      問題を生成する
+                    </button>
+                  </div>
+                ) : (
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    {examHistory.map((item, index) => (
+                      <div
+                        key={item.id || index}
+                        className="bg-slate-900 border border-slate-800 hover:border-slate-700 rounded-2xl p-5 shadow-lg transition-all flex flex-col justify-between"
+                      >
+                        <div>
+                          <div className="flex items-start justify-between gap-2 mb-2">
+                            <span className="text-xs text-blue-400 font-semibold">{item.createdAt}</span>
+                            <span className="px-2.5 py-1 rounded-lg bg-blue-500/10 border border-blue-500/20 text-blue-300 font-bold text-xs">
+                              {item.score} 点
+                            </span>
+                          </div>
+                          <h3 className="font-bold text-slate-100 text-sm mb-3">{item.title}</h3>
+                          <p className="text-xs text-slate-400 mb-4">
+                            正解数: {item.correctCount} / {item.totalCount} 問 | 解答時間: {formatTime(item.timeSpent || 0)}
+                          </p>
+                        </div>
+
+                        <div className="flex items-center gap-2 pt-3 border-t border-slate-800">
+                          <button
+                            onClick={() => {
+                              setSelectedHistoryItem(item);
+                              setScreen('review_detail');
+                            }}
+                            className="flex-1 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors"
+                          >
+                            <FileText className="w-3.5 h-3.5" /> 復習・解説を見る
+                          </button>
+                          <button
+                            onClick={() => handleStartExam(item.title)}
+                            className="p-2 rounded-xl bg-blue-600/20 hover:bg-blue-600/30 text-blue-300 border border-blue-500/30 text-xs transition-colors"
+                            title="再挑戦"
+                          >
+                            <RotateCcw className="w-4 h-4" />
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {screen === 'review_detail' && selectedHistoryItem && (
+              <div className="space-y-6 max-w-4xl mx-auto">
+                <div className="flex items-center justify-between">
+                  <button
+                    onClick={() => setScreen('history')}
+                    className="px-4 py-2 rounded-xl bg-slate-900 border border-slate-800 text-slate-300 hover:bg-slate-800 text-xs font-semibold flex items-center gap-2 transition-all"
+                  >
+                    <ArrowLeft className="w-4 h-4" /> 履歴一覧に戻る
+                  </button>
+
+                  <button
+                    onClick={() => handleStartExam(selectedHistoryItem.title)}
+                    className="px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold flex items-center gap-2 transition-all"
+                  >
+                    <RotateCcw className="w-4 h-4" /> もう一度この試験を復習解きする
+                  </button>
+                </div>
+
+                <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6">
+                  <span className="text-xs text-blue-400 font-semibold">{selectedHistoryItem.createdAt} の記録</span>
+                  <h2 className="text-xl font-bold text-white mt-1 mb-2">{selectedHistoryItem.title}</h2>
+                  <p className="text-xs text-slate-400">
+                    スコア: <span className="text-emerald-400 font-bold text-sm">{selectedHistoryItem.score} 点</span> （{selectedHistoryItem.correctCount} / {selectedHistoryItem.totalCount} 問正解）
+                  </p>
+                </div>
+
+                <div className="space-y-4">
+                  {selectedHistoryItem.questions.map((q, idx) => {
+                    const userAns = selectedHistoryItem.userAnswers ? selectedHistoryItem.userAnswers[idx] : undefined;
+                    const isCorrect = userAns === q.correctIndex;
+
+                    return (
+                      <div key={idx} className="bg-slate-900 border border-slate-800 rounded-2xl p-6 space-y-4">
+                        <div className="flex items-center justify-between">
+                          <span className={`px-2.5 py-1 rounded-lg text-xs font-bold flex items-center gap-1 ${
+                            isCorrect ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/30' : 'bg-red-500/10 text-red-400 border border-red-500/30'
+                          }`}>
+                            {isCorrect ? <CheckCircle className="w-3.5 h-3.5" /> : <XCircle className="w-3.5 h-3.5" />}
+                            {isCorrect ? '正解' : '不正解'}
+                          </span>
+                          <span className="text-xs font-bold text-slate-400">問 {idx + 1}</span>
+                        </div>
+
+                        <h4 className="text-sm font-semibold text-slate-100">{q.question}</h4>
+
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs">
+                          {q.options.map((opt, optIdx) => {
+                            const isUserChoice = userAns === optIdx;
+                            const isRightChoice = q.correctIndex === optIdx;
+
+                            let styleClass = 'bg-slate-950 border-slate-800 text-slate-400';
+                            if (isRightChoice) styleClass = 'bg-emerald-500/10 border-emerald-500/40 text-emerald-300 font-semibold';
+                            else if (isUserChoice && !isRightChoice) styleClass = 'bg-red-500/10 border-red-500/40 text-red-300';
+
+                            return (
+                              <div key={optIdx} className={`p-3 rounded-xl border ${styleClass} flex items-center justify-between`}>
+                                <span>
+                                  <span className="font-bold mr-2">{['A', 'B', 'C', 'D'][optIdx]}.</span>
+                                  {opt}
+                                </span>
+                                {isRightChoice && <span className="text-[10px] bg-emerald-500/20 text-emerald-300 px-2 py-0.5 rounded">正解</span>}
+                                {isUserChoice && !isRightChoice && <span className="text-[10px] bg-red-500/20 text-red-300 px-2 py-0.5 rounded">あなたの選択</span>}
+                              </div>
+                            );
+                          })}
+                        </div>
+
+                        <div className="p-4 rounded-xl bg-slate-950 border border-slate-800 text-xs text-slate-300 space-y-1">
+                          <span className="font-bold text-blue-400 flex items-center gap-1 mb-1">
+                            <Sparkles className="w-3.5 h-3.5" /> AI解説
+                          </span>
+                          <p className="leading-relaxed">{q.explanation}</p>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
+          </main>
+        </div>
+      );
+    }
+
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(<App />);
+  </script>
+</body>
+</html>
